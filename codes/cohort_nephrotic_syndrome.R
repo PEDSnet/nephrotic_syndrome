@@ -418,3 +418,25 @@ get_nephrotic_subcohort_so <- function(cohort,
 }
 
 
+get_biopsy_procedures <- function(cohort,
+                                  kb_codeset,
+                                  procedure_tbl) {
+  kb_cis <-
+    kb_codeset %>%
+    select(concept_id) %>%
+    pull()
+  
+  kb_procedures <- procedure_tbl %>%
+    filter(procedure_concept_id %in% kb_cis) %>%
+    inner_join(cohort, by = "person_id") %>%
+    inner_join(kb_codeset, by = c("procedure_concept_id" = "concept_id")) %>%
+    filter(
+      sv_search_req == 0 |
+        sv_search_req == 1 &
+        !str_detect(tolower(procedure_source_value), "adrenal"),
+      (
+        str_detect(tolower(procedure_source_value), "renal") |
+          str_detect(tolower(procedure_source_value), "kidney")
+      )
+    )
+}

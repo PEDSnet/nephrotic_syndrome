@@ -58,40 +58,6 @@ glomerular_disease_neph_req_vctr <-
 
 glomerular_disease_w_gen_flag <- glomerular_disease %>%
   filter(genetic_flag == 1 | congenital_flag == 1)
-# 
-# # Identify glomerular disease cohort
-# # 2 broad pathways into the cohort:
-# # -- 2 or more glomerular inclusion diagnoses on different dates
-# # -- 1 or more glomerular inclusion diagnosis AND 1 or more kidney biopsy which is not post-transplant
-# # 2 glomerular inclusion diagnosis groups had special requirements:
-# # -- "other_code_req" inclusion diagnoses alone are not sufficient for a patient to meet the computational phenotype:
-# # these codes are only included if they have 1 or more other glomerular inclusion diagnoses
-# # (i.e. NOT from "other_code_req" list) on a different date or if they have 1 or more kidney biopsy which is not post-transplant
-# # -- "neph_req" diagnoses are only included for the algorithm if associated with a nephrology visit
-# 
-# message("Identify glomerular disease cohort 2010 to 2022")
-# 
-#  glom_dx_cohort_20102022 <-
-#   get_glean_cohort(
-#     condition_tbl = condition_occurrence_20102022,
-#     procedure_tbl = procedure_occurrence_20102022,
-#     visit_tbl = visit_occurrence_20102022,
-#     kidney_transplant_proc_codeset = load_codeset("kidney_transplant_proc"),
-#     kidney_biopsy_proc_codeset = load_codeset("kidney_biopsy_proc"),
-#     biopsy_proc_codeset = load_codeset("biopsy_proc"),
-#     glomerular_disease_codeset = glomerular_disease,
-#     other_code_req_vctr = glomerular_disease_other_code_req_vctr,
-#     neph_req_vctr = glomerular_disease_neph_req_vctr,
-#     nephrology_spec_codeset  = load_codeset("nephrology_specialty")
-#   ) %>%
-#   inner_join(physician_visit, by = "person_id")
-# 
-# glom_dx_cohort_20102022 %>% output_tbl("glom_dx_cohort_20102022",
-#                                        indexes = list("person_id"))
-# 
-# append_sum(cohort = "glom_dx_cohort_20102022",
-#            persons = glom_dx_cohort_20102022 %>% distinct_ct())
-
 
 ##################################################################################
 
@@ -118,21 +84,6 @@ so_nephrotic_sc <-
   compute_new()
 
 so_nephrotic_sc %>% output_tbl("so_nephrotic_sc")
-
-# nephrotic_20102022 <-
-#   get_nephrotic_subcohort(
-#     condition_tbl = condition_occurrence_20102022,
-#     cohort = glom_dx_cohort_20102022,
-#     nephrotic_codeset = glomerular_disease %>% filter(codeset_category_code == 1),
-#     nephritic_codeset = glomerular_disease %>% filter(codeset_category_code == 2)
-#   )
-# 
-# nephrotic_20102022 %>% output_tbl("nephrotic_20102022",
-#                                   indexes = list("person_id"))
-# 
-# append_sum(cohort = "nephrotic_20102022",
-#            persons = nephrotic_20102022 %>% distinct_ct())
-
 
 ##################################################################################
 
@@ -234,4 +185,56 @@ nephrotic_no_sle %>% output_tbl("nephrotic_no_sle",
 
 append_sum(cohort = "nephrotic_no_sle",
            persons = distinct_ct(nephrotic_no_sle))
+
+##################################################################################
+
+#' NOT the same as kidney biopsy! See below.
+
+message('Finding follow up time')
+transplant_pts <- get_kidney_transplant_broad(
+  cohort =
+    results_tbl('nephrotic_no_sle'),
+  kidney_transplant_codeset =
+    load_codeset('kidney_transplant_broad', 'icccc'),
+  min_date_cutoff = as.Date("2010-01-01"),
+  max_date_cutoff = as.Date("2022-11-30")
+)
+output_tbl(transplant_pts,
+           'transplant_pts',
+           indexes = list('person_id'))
+
+followup_tbl <-
+  generate_followup(
+    condition_tbl = condition_occurrence_20102022,
+    visit_tbl = visit_occurrence_20102022,
+    transplant_tbl = results_tbl('transplant_pts'),
+    cohort = results_tbl('nephrotic_no_sle') %>% select(-site),
+    nephrotic_codeset=
+      load_codeset('glomerular_disease','iccciciiii') %>% 
+      filter(codeset_category_code == 1)
+  )
+
+output_tbl(followup_tbl,
+           'followup_tbl',
+           indexes = list('person_id'))
+
+############################################################################
+#Kidney Biopsy Information
+############################################################################
+
+message('Get kidney biopsy results for stratification')
+
+so_kidney_biopsy <-
+  get_biopsy_procedures(
+    cohort = results_tbl("so_follow_up_req"),
+    kb_codeset = load_codeset("kidney_biopsy"),
+    procedure_tbl = results_tbl('procedure_occurrence')
+  ) %>%
+  compute_new()
+
+kb_proc <- so_kidney_biopsy %>%
+  distinct(person_id) %>%
+  mutate(kidney_biopsy_flag = 1L)
+
+output_tbl(kb_proc,'kidney_biopsy_person_list_so')
 
