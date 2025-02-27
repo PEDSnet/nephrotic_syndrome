@@ -440,3 +440,345 @@ get_biopsy_procedures <- function(cohort,
       )
     )
 }
+
+
+#' Get table of conditions in codeset, restricted to cohort if provided,
+#' from CDM condition table
+#'
+#' @param provided_cohort Cohort
+#' @param condition_codeset Condition codeset
+#'
+#' @return Table of conditions in codeset, restricted to
+#' cohort if provided
+#'
+get_conditions <- function(provided_cohort,
+                           condition_codeset,
+                           condition_tbl = cdm_tbl("condition_occurrence")) {
+  condition_vctr <-
+    condition_codeset %>% distinct(concept_id) %>% pull()
+  
+  if (missing(provided_cohort)) {
+    cohort_birth_dates <- cdm_tbl("person") %>%
+      select(person_id, birth_date)
+  }
+  else {
+    cohort_birth_dates <- cdm_tbl("person") %>%
+      inner_join(select(provided_cohort, person_id), by = "person_id") %>%
+      select(person_id, birth_date)
+  }
+  
+  conditions <- condition_tbl %>%
+    inner_join(select(cohort_birth_dates, person_id, birth_date), by = "person_id") %>%
+    filter(condition_concept_id %in% condition_vctr) %>%
+    mutate(condition_age_days = condition_start_date - birth_date)
+  
+  return(conditions)
+}
+
+#' This file contains functions to identify cohorts in a study.  Its
+#' contents, as well as the contents of any R files whose name begins
+#' with "cohort_", will be automatically sourced when the request is
+#' executed.
+#'
+#' For simpler requests, it will often be possible to do all cohort
+#' manipulation in functions within this file.  For more complex
+#' requests, it may be more readable to separate different cohorts or
+#' operations on cohorts into logical groups in different files.
+
+#' Get eligible condition info for patients with codes in the
+#' inclusion codeset and no codes in the exclusion codeset
+#'
+#' @param incl_codeset_name
+#' @param excl_codeset_name
+#'
+#' @return Table of condition info for patients with codes in the
+#' inclusion codeset and no codes in the exclusion codeset
+get_elig_conds_for_i_e_pats <- function(incl_codeset_name,
+                                        excl_codeset_name,
+                                        cond_tbl=cdm_tbl('condition_occurrence')) {
+  pats_incl <- cond_tbl %>%
+    inner_join(load_codeset(incl_codeset_name),
+               by = c("condition_concept_id" = "concept_id")) %>%
+    distinct(
+      condition_occurrence_id,
+      person_id,
+      site,
+      visit_occurrence_id,
+      condition_concept_id,
+      condition_concept_name,
+      condition_type_concept_id,
+      condition_start_date,
+      condition_source_value
+    ) %>%
+    compute_new()
+  
+  pats_excl <- cond_tbl %>%
+    inner_join(load_codeset(excl_codeset_name),
+               by = c("condition_concept_id" = "concept_id")) %>%
+    distinct(person_id) %>%
+    compute_new()
+  
+  elig_conds_for_i_e_pats <- pats_incl %>%
+    anti_join(pats_excl, by = "person_id") %>%
+    compute_new()
+  
+  return(elig_conds_for_i_e_pats)
+  
+}
+
+
+#'  Get condition table with flags for patients with inclusion conditions who do not have
+#'  conditions of exclusion AND who have eligible visits (more than one visit with a nephrology
+#'  or rheumotology provider)
+#'
+#' @param elig_conds_for_i_e_pats Patients with any of the inclusion criteria and none of the exclusion criteria
+#' @param incl_provider_spec_name Name of provider specialty codeset
+#' @param incl_visit_name Name of visit type codeset
+#'
+#' @return Get condition table with flags for patients with inclusion conditions who do not have
+#'  conditions of exclusion AND who have eligible visits (more than one visit with a nephrology
+#'  or rheumotology provider)
+get_elig_conds_for_i_e_pats_w_elig_visits <-
+  function(incl_spec_codeset,
+           incl_visit_codeset,
+           elig_conds_for_i_e_pats) {
+    
+    i_e_pats <- elig_conds_for_i_e_pats %>% 
+      distinct(person_id) %>% 
+      compute_new()
+    
+    elig_visits <-
+      get_elig_visits_for_cohort(
+        incl_spec_codeset = incl_spec_codeset,
+        incl_visit_codeset = incl_visit_codeset,
+        cohort = i_e_pats
+      ) %>% 
+      compute_new()
+    
+    elig_visits_pats <- elig_visits %>% 
+      distinct(person_id) %>% 
+      compute_new()
+    
+    elig_conds_for_i_e_pats_w_elig_visits <-
+      elig_conds_for_i_e_pats %>%
+      inner_join(select(elig_visits, person_id),
+                 by = "person_id") %>%
+      distinct(
+        condition_occurrence_id,
+        person_id,
+        site,
+        visit_occurrence_id,
+        condition_concept_id,
+        condition_concept_name,
+        condition_type_concept_id,
+        condition_start_date,
+        condition_source_value
+      ) %>%
+      compute_new()
+    
+    return(elig_conds_for_i_e_pats_w_elig_visits)
+    
+  }
+
+
+
+#' Get SLE cohort
+#'
+#' 2 or more in-person visits with a nephrology or rheumatology provider or care
+#' site, AND
+#' 60 or more days follow-up, AND
+#' No occurrence of neonatal lupus erythematosus, AND
+#' 1 or more hydroxychloroquine drug exposure at any time, AND
+#' 3 or more SLE inclusion codes associated with any visit type each separated 30
+#' or more days, OR
+#' 1 or more SLE inclusion code associated with any visit type at any time AND 1
+#' or more kidney biopsy procedure code at any time
+#'
+#' @param elig_conds_sle_i_e_pats_w_elig_visits SLE condition rows for patients
+#' who meet other criteria
+#' @param drug_codeset Drug codeset
+#'
+#' @return Patients who meet SLE cohort criteria
+#' 
+get_sle_cohort <- function(elig_conds_sle_i_e_pats_w_elig_visits,
+                           drug_codeset) {
+  sle_alg_b <- get_alg_b(elig_conds_sle_i_e_pats_w_elig_visits) %>%
+    compute_new()
+  
+  sle_i_e_pats_w_elig_visits <- elig_conds_sle_i_e_pats_w_elig_visits %>% 
+    distinct(person_id)
+  
+  kidney_biopsy <-
+    get_patients_with_kidney_biopsy(sle_i_e_pats_w_elig_visits) %>%
+    get_patients_w_60_or_more_days_followup() %>% 
+    compute_new()
+  
+  sle_cohort <- sle_alg_b %>%
+    dplyr::union(kidney_biopsy) %>%
+    compute_new() %>%
+    get_patients_w_drug_exposure(drug_codeset) %>%
+    add_site() %>% 
+    compute_new()
+  
+}
+
+
+#' Get kidney transplant procedures and conditions, restricted to a cohort
+#' if provided, from condition_occurrence and procedure_occurrence CDM tables
+#'
+#' @param cohort Cohort
+#' @param kidney_transplant_codeset Kidney transplant codeset
+#' @param age_ub_years Age upper bound
+#' @param min_date_cutoff Date before which visits are excluded
+#' @param max_date_cutoff Date after which visits are excluded
+#'
+#' @return Table with the following fields: person_id, site, concept_id,
+#' source_value, concept_name, record_type (procedure/condition), and date
+#' for kidney transplant procedures and conditions
+#'
+get_kidney_transplant_broad <- function(cohort,
+                                        kidney_transplant_codeset = 
+                                          load_codeset('kidney_transplant_broad','icccc'),
+                                        age_ub_years = 30L,
+                                        min_date_cutoff = as.Date("2009-01-01"),
+                                        max_date_cutoff = as.Date("2021-01-01")) {
+  
+  kidney_transplant_proc <- get_procedures(provided_cohort = cohort,
+                                           procedure_codeset = kidney_transplant_codeset) %>%
+    mutate(table_name = as.character("procedure"),
+           approach = as.character("proc")) %>%
+    select(
+      person_id,
+      site,
+      occurrence_id = procedure_occurrence_id,
+      concept_id = procedure_concept_id,
+      source_value = procedure_source_value,
+      concept_name = procedure_concept_name,
+      table_name,
+      approach,
+      transplant_date = procedure_date,
+      age_in_days = procedure_age_days
+    )
+  
+  kidney_transplant_cond <- get_conditions(provided_cohort = cohort,
+                                           condition_codeset = kidney_transplant_codeset) %>%
+    mutate(table_name = as.character("condition"),
+           approach = as.character("cond")) %>%
+    select(
+      person_id,
+      site,
+      occurrence_id = condition_occurrence_id,
+      concept_id = condition_concept_id,
+      source_value = condition_source_value,
+      concept_name = condition_concept_name,
+      table_name,
+      approach,
+      transplant_date = condition_start_date,
+      age_in_days = condition_age_days
+    )
+  
+  kidney_transplant_occurrences <- kidney_transplant_cond %>%
+    dplyr::union(kidney_transplant_proc) %>% 
+    filter(age_in_days < 365.25 * age_ub_years,
+           transplant_date >= min_date_cutoff,
+           transplant_date < max_date_cutoff)
+  
+  return(kidney_transplant_occurrences)
+  
+}
+
+
+
+#' function to compute follow up time
+#' 
+#' @param condition_tbl conditions to get date of entry
+#' @param visit_tbl viisits to derive last visit date
+#' @param transplant_tbl tbl which contains transplant_date
+#' @param cohort cohort of interest
+#' 
+#' @return tbl with the following columns:
+#' 
+#' person_id | sitet | cohort_entry | cohort_exit | follow_up_days | follow_up_yrs
+#' 
+
+generate_followup <- function(condition_tbl,
+                              visit_tbl,
+                              transplant_tbl,
+                              cohort,
+                              nephrotic_codeset=
+                                load_codeset('glomerular_disease','iccciciiii') %>% 
+                                filter(codeset_category_code == 1)) {
+  
+  nephrotic_first <- 
+    cohort %>%
+    select(person_id) %>% distinct %>%
+    inner_join(
+      condition_tbl,
+      by='person_id'
+    ) %>%
+    inner_join(
+      select(
+        nephrotic_codeset,
+        concept_id
+      ), by = 
+        c('condition_concept_id'='concept_id')
+    ) %>% 
+    group_by(person_id,site) %>%
+    summarise(
+      cohort_entry=min(condition_start_date)
+    ) %>% ungroup() %>% compute_new(temporary=TRUE)
+  
+  transplant_dt <- 
+    transplant_tbl %>%
+    group_by(
+      person_id,
+      site
+    ) %>% 
+    summarise(
+      cohort_exit=min(transplant_date)
+    ) %>% ungroup() %>% compute_new(temporary=TRUE)
+  
+  last <- 
+    cohort %>%
+    anti_join(
+      transplant_dt,
+      by='person_id'
+    ) %>%
+    inner_join(
+      select(
+        visit_tbl,
+        person_id,
+        visit_start_date,
+        visit_concept_id,
+        site
+      ), by='person_id'
+    ) %>% 
+    filter(
+      visit_concept_id %in% c(9201L,
+                              9202L,
+                              9203L,
+                              2000000048L,
+                              2000000088L,
+                              2000000469L)
+    ) %>%
+    group_by(person_id,site) %>%
+    summarise(
+      cohort_exit=max(visit_start_date)
+    ) %>% ungroup() %>% compute_new(temporary=TRUE)
+  
+  cohort_exit <- 
+    dplyr::union(transplant_dt,
+                 last) 
+  
+  flags <- 
+    cohort %>%
+    select(person_id) %>%
+    left_join(nephrotic_first, by = "person_id") %>%
+    left_join(cohort_exit, by = c("person_id", "site")) %>%
+    mutate(follow_up_days = cohort_exit - cohort_entry) %>%
+    mutate(follow_up_yrs = round(follow_up_days/365.25, 2)) %>%
+    mutate(cohort_entry_year=sql("extract(year from cohort_entry)")) %>%
+    mutate(cohort_exit_year=sql("extract(year from cohort_exit)"))
+  
+}
+
